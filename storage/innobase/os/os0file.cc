@@ -233,7 +233,7 @@ struct Slot {
 	os_offset_t		offset;
 
 	/** file where to read or write */
-	os_file_t		file;
+    radosfs::File   file;
 
 	/** file name or path */
 	const char*		name;
@@ -3653,6 +3653,8 @@ os_file_create_func(
 	bool		retry;
 
 	do {
+        /** Radosfs, new file object */
+        radosfs::File radosfile(&fs, name,radosfs::File::MODE_READ_WRITE);
 		file = ::open(name, create_flag, os_innodb_umask);
 
 		if (file == -1) {
@@ -3788,6 +3790,7 @@ os_file_create_simple_no_error_handling_func(
 		return(OS_FILE_CLOSED);
 	}
 
+    /** Radosfs, new file object */
 	file = ::open(name, create_flag, os_innodb_umask);
 
 	*success = (file != -1);
@@ -5448,6 +5451,9 @@ NUM_RETRIES_ON_PARTIAL_IO times to read/write the complete data.
 @param[in]	n		number of bytes to read, starting from offset
 @param[out]	err		DB_SUCCESS or error code
 @return number of bytes read/written, -1 if error */
+
+/** Radosfs: could invoque SyncRadosIO instead of SyncFileIO */ 
+
 static MY_ATTRIBUTE((warn_unused_result))
 ssize_t
 os_file_io(

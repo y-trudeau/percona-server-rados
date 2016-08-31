@@ -36,8 +36,10 @@ Created 10/21/1995 Heikki Tuuri
 #define os0file_h
 
 #include "univ.i"
+#include <libradosfs.hh>
 
 #ifndef _WIN32
+
 #include <dirent.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -96,7 +98,7 @@ the OS actually supports it: Win 95 does not, NT does. */
 typedef DIR*	os_file_dir_t;	/*!< directory stream */
 
 /** File handle */
-typedef int	os_file_t;
+typedef radosf::File&	os_file_t;
 
 # define os_file_invalid	(-1)
 
