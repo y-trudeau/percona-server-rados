@@ -233,7 +233,7 @@ struct Slot {
 	os_offset_t		offset;
 
 	/** file where to read or write */
-    radosfs::File   file;
+    os_file_t       file;
 
 	/** file name or path */
 	const char*		name;
@@ -2170,10 +2170,21 @@ SyncFileIO::execute(const IORequest& request)
 	ssize_t	n_bytes;
 
 	if (request.is_read()) {
+#ifdef RADOSFS
+        n_bytes = mf_fh->read(m_buf, m_offset, m_n);
+#else
 		n_bytes = pread(m_fh, m_buf, m_n, m_offset);
+#endif /* RADOSFS */
 	} else {
 		ut_ad(request.is_write());
+#ifdef RADOSFS
+        int ret = mf_fh->writeSync(m_buf, m_offset, m_n);
+        // in theory, since RADOS is atomic
+        if (ret == 0) n_bytes = m_n;
+        else n_bytes = 0;
+#else
 		n_bytes = pwrite(m_fh, m_buf, m_n, m_offset);
+#endif /* RADOSFS */
 	}
 
 	return(n_bytes);
@@ -2195,6 +2206,9 @@ os_file_punch_hole_posix(
 #ifdef HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE
 	const int	mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
 
+#ifdef RADOSFS
+    return(DB_SUCCESS); // noop for RADOS
+#else
 	int		ret = fallocate(fh, mode, off, len);
 
 	if (ret == 0) {
@@ -2215,6 +2229,7 @@ os_file_punch_hole_posix(
 
 	return(DB_IO_ERROR);
 
+#endif /* RADOSFS */
 #elif defined(UNIV_SOLARIS)
 
 	// Use F_FREESP
@@ -2832,6 +2847,10 @@ AIO::is_linux_native_aio_supported()
 	io_context_t	io_ctx;
 	char		name[1000];
 
+#ifdef RADOSFS
+    return(false); // forces simulated aio for RADOSFS
+#endif /* RADOSFS */
+
 	if (!linux_create_io_ctx(1, &io_ctx)) {
 
 		/* The platform does not support native aio. */
@@ -3082,7 +3101,14 @@ os_file_fsync_posix(
 
 		++os_n_fsyncs;
 
+#ifdef RADOSFS
+        int ret = file->sync();
+        int errno = ret * -1;  /* force a local errno since sync()
+                             doesn't set it but returns the error
+                             code */
+#else
 		int	ret = fsync(file);
+#endif /* RADOSFS */
 
 		if (ret == 0) {
 			return(ret);
@@ -3153,7 +3179,14 @@ os_file_status_posix(
 {
 	struct stat	statinfo;
 
+#ifdef RADOSFS
+    os_file_t file = new radosfs::File(&radosFs, path,radosfs::File::MODE_READ);
+    int	ret = file.stat(&statinfo);
+    int errno = ret * -1; /* local errno */
+    delete file;
+#else
 	int	ret = stat(path, &statinfo);
+#endif /* RADOSFS */
 
 	*exists = !ret;
 
@@ -3241,7 +3274,10 @@ os_file_create_simple_func(
 	bool		read_only,
 	bool*		success)
 {
-	os_file_t	file;
+
+#ifdef RADOSFS
+    radosfs::File::OpenMode  rados_open_mode;
+#endif /* RADOSFS */
 
 	*success = false;
 
@@ -3308,6 +3344,20 @@ os_file_create_simple_func(
 		return(OS_FILE_CLOSED);
 	}
 
+#ifdef RADOSFS
+    if (create_flag & O_RDONLY) rados_open_mode = radosfs::File::MODE_READ;
+    else rados_open_mode = radosfs::File::MODE_READ_WRITE;
+
+    os_file_t   file = new radosfs::File(&radosFs, name,rados_open_mode);
+    int         ret=0;
+
+    do {
+        if (create_mode == OS_FILE_CREATE)
+            ret = file->create(os_innodb_umask, "", INNODB_PAGE_SIZE, 4096);
+
+        if (ret != 0) {
+#else
+    os_file_t	file;
 	bool	retry;
 
 	do {
@@ -3315,6 +3365,8 @@ os_file_create_simple_func(
 			      os_innodb_umask);
 
 		if (file == -1) {
+#endif /* RADOSFS */
+
 			*success = false;
 
 			if (errno == EINTR) {
@@ -3382,7 +3434,14 @@ os_file_create_directory(
 	const char*	pathname,
 	bool		fail_if_exists)
 {
+
+#ifdef RADOSFS
+    radosfs::Dir dir(&radosFs, pathname);
+    int rcode = dir.create(0770,false,-1,-1);
+    int errno = rcode * -1;
+#else
 	int	rcode = mkdir(pathname, 0770);
+#endif /* RADOSFS */
 
 	if (!(rcode == 0 || (errno == EEXIST && !fail_if_exists))) {
 		/* failure */
@@ -3411,9 +3470,18 @@ os_file_opendir(
 	const char*	dirname,
 	bool		error_is_fatal)
 {
+
+#ifdef RADOSFS
+    os_file_dir_t dir = new radosFs::Dir(&radosFS,dirname);
+    if (!dir.exists()) {
+        delete dir;
+        dir = NULL;
+    }
+#else
 	os_file_dir_t		dir;
 	dir = opendir(dirname);
 
+#endif /* RADOSFS */
 	if (dir == NULL && error_is_fatal) {
 		os_file_handle_error(dirname, "opendir");
 	}
@@ -3428,8 +3496,14 @@ int
 os_file_closedir(
 	os_file_dir_t	dir)
 {
+#ifdef RADOSFS
+    delete dir;
+    int ret = 0;
+
+#else
 	int	ret = closedir(dir);
 
+#endif /* RADOSFS */
 	if (ret != 0) {
 		os_file_handle_error_no_exit(NULL, "closedir", false);
 	}
@@ -3454,6 +3528,10 @@ os_file_readdir_next_file(
 	int		ret;
 	struct stat	statinfo;
 
+#ifdef RADOSFS
+    struct dirent	local_dirent;
+    ent = &local_dirent; /* to allow better integration */
+#else
 #ifdef HAVE_READDIR_R
 	char		dirent_buf[sizeof(struct dirent)
 				   + _POSIX_PATH_MAX + 100];
@@ -3461,9 +3539,39 @@ os_file_readdir_next_file(
 	the max file name len; but in most standards, the
 	length is NAME_MAX; we add 100 to be even safer */
 #endif /* HAVE_READDIR_R */
+#endif /* RADOSFS */
 
 next_file:
 
+#ifdef RADOSFS
+    std::string entry;
+    ret = dir->nextEntry(&entry);
+
+	if (ret != 0) {
+
+		ib::error()
+			<< "Cannot read directory " << dirname
+			<< " error: " << ret;
+
+		return(-1);
+	}
+
+	if (entry.size() == 0) {
+		/* End of directory */
+
+		return(1);
+	}
+
+    if (entry.size() < 255) {
+        std::copy(entry.begin(), entry.end(), ent->d_name);
+        ent->d_name[entry.size()] = '\0';
+    } else {
+		ib::error()
+			<< "Directory entry too long " << entry.c_str();
+
+		return(-1);
+    }
+#else
 #ifdef HAVE_READDIR_R
 	ret = readdir_r(dir, (struct dirent*) dirent_buf, &ent);
 
@@ -3491,6 +3599,8 @@ next_file:
 		return(1);
 	}
 #endif /* HAVE_READDIR_R */
+#endif /* RADOSFS */
+
 	ut_a(strlen(ent->d_name) < OS_FILE_MAX_PATH);
 
 	if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
@@ -3505,7 +3615,15 @@ next_file:
 
 	sprintf(full_path, "%s/%s", dirname, ent->d_name);
 
+#ifdef RADOSFS
+    os_file_t file = new radosfs::File(&radosFs, path,radosfs::File::MODE_READ);
+    int	ret = file.stat(&statinfo);
+    int errno = ret * -1; /* local errno */
+    delete file;
+#else
+
 	ret = stat(full_path, &statinfo);
+#endif /* RADOSFS */
 
 	if (ret) {
 
@@ -3578,6 +3696,10 @@ os_file_create_func(
 	bool		on_error_no_exit;
 	bool		on_error_silent;
 
+#ifdef RADOSFS
+    radosfs::File::OpenMode  rados_open_mode;
+#endif /* RADOSFS */
+
 	*success = false;
 
 	DBUG_EXECUTE_IF(
@@ -3616,12 +3738,10 @@ os_file_create_func(
 
 		mode_str = "CREATE";
 		create_flag = O_RDWR | O_CREAT | O_EXCL;
-
 	} else if (create_mode == OS_FILE_OVERWRITE) {
 
 		mode_str = "OVERWRITE";
 		create_flag = O_RDWR | O_CREAT | O_TRUNC;
-
 	} else {
 		ib::error()
 			<< "Unknown file create mode (" << create_mode << ")"
@@ -3649,15 +3769,30 @@ os_file_create_func(
 	}
 #endif /* O_SYNC */
 
-	os_file_t	file;
+#ifdef RADOSFS
+    if (create_flag & O_RDONLY) rados_open_mode = radosfs::File::MODE_READ;
+    else rados_open_mode = radosfs::File::MODE_READ_WRITE;
+
+	os_file_t	file = new radosfs::File(&radosFs, name,rados_open_mode);
+    int         ret=0;
+
+    do {
+        if (create_flag & O_TRUNC)
+            file->truncate(0);
+        if (create_mode == OS_FILE_CREATE)
+            ret = file->create(os_innodb_umask, "", INNODB_PAGE_SIZE, 4096);
+
+        if (ret != 0) {
+#else
+    os_file_t	file;
 	bool		retry;
 
 	do {
-        /** Radosfs, new file object */
-        radosfs::File radosfile(&fs, name,radosfs::File::MODE_READ_WRITE);
-		file = ::open(name, create_flag, os_innodb_umask);
+
+        file = ::open(name, create_flag, os_innodb_umask);
 
 		if (file == -1) {
+#endif /* RADOSFS */
 			const char*	operation;
 
 			operation = (create_mode == OS_FILE_CREATE
@@ -3680,6 +3815,7 @@ os_file_create_func(
 
 	/* We disable OS caching (O_DIRECT) only on data files */
 
+#ifndef RADOSFS
 	if (!read_only
 	    && *success
 	    && (type != OS_LOG_FILE && type != OS_DATA_TEMP_FILE)
@@ -3722,6 +3858,7 @@ os_file_create_func(
 		file = -1;
 	}
 #endif /* USE_FILE_LOCK */
+#endif /* !RADOSFS */
 
 	return(file);
 }
@@ -3749,6 +3886,9 @@ os_file_create_simple_no_error_handling_func(
 {
 	os_file_t	file;
 	int		create_flag;
+#ifdef RADOSFS
+    radosfs::File::OpenMode  rados_open_mode;
+#endif /* RADOSFS */
 
 	ut_a(!(create_mode & OS_FILE_ON_ERROR_SILENT));
 	ut_a(!(create_mode & OS_FILE_ON_ERROR_NO_EXIT));
@@ -3790,10 +3930,27 @@ os_file_create_simple_no_error_handling_func(
 		return(OS_FILE_CLOSED);
 	}
 
-    /** Radosfs, new file object */
-	file = ::open(name, create_flag, os_innodb_umask);
+#ifdef RADOSFS
+    if (create_flag & O_RDONLY) rados_open_mode = radosfs::File::MODE_READ;
+    else rados_open_mode = radosfs::File::MODE_READ_WRITE;
 
-	*success = (file != -1);
+	os_file_t	file = new radosfs::File(&radosFs, name,rados_open_mode);
+    int         ret=0;
+
+    do {
+    if (create_flag & O_TRUNC)
+        file->truncate(0);
+    if (create_mode == OS_FILE_CREATE)
+        ret = file->create(os_innodb_umask, "", INNODB_PAGE_SIZE, 4096);
+
+    *success = (file != NULL);
+#else
+    os_file_t	file;
+
+    file = ::open(name, create_flag, os_innodb_umask);
+    *success = (file != -1);
+#endif /* RADOSFS */
+
 
 #ifdef USE_FILE_LOCK
 	if (!read_only
@@ -3824,6 +3981,19 @@ os_file_delete_if_exists_func(
 		*exist = true;
 	}
 
+#ifdef RADOSFS
+	os_file_t	file = new radosfs::File(&radosFs, name,radosfs::File::MODE_WRITE);
+    int ret;
+
+    *exist = file.exists();
+    if (*exists)
+        ret = file.remove();
+    delete file;
+
+    if (ret != 0) {
+        os_file_handle_error_no_exit(name, "delete", false);
+
+#else
 	int	ret = unlink(name);
 
 	if (ret != 0 && errno == ENOENT) {
@@ -3833,10 +4003,13 @@ os_file_delete_if_exists_func(
 	} else if (ret != 0 && errno != ENOENT) {
 		os_file_handle_error_no_exit(name, "delete", false);
 
+#endif /* RADOSFS */
 		return(false);
 	}
 
 	return(true);
+
+
 }
 
 /** Deletes a file. The file has to be closed before calling this.
@@ -3846,7 +4019,15 @@ bool
 os_file_delete_func(
 	const char*	name)
 {
+
+#ifdef RADOSFS
+	os_file_t	file = new radosfs::File(&radosFs, name,radosfs::File::MODE_WRITE);
+
+    int ret = file.remove();
+    delete file;
+#else
 	int	ret = unlink(name);
+#endif /* RADOSFS */
 
 	if (ret != 0) {
 		os_file_handle_error_no_exit(name, "delete", false);
@@ -3882,7 +4063,13 @@ os_file_rename_func(
 	ut_ad(exists);
 #endif /* UNIV_DEBUG */
 
+#ifdef RADOSFS
+    radosfs::File file(&radosFs, oldpath);
+    int ret = file.rename(newpath);
+    delete file;
+#else
 	int	ret = rename(oldpath, newpath);
+#endif /* RADOSFS */
 
 	if (ret != 0) {
 		os_file_handle_error_no_exit(oldpath, "rename", false);
@@ -3903,7 +4090,13 @@ bool
 os_file_close_func(
 	os_file_t	file)
 {
+
+#ifdef RADOSFS
+    delete file;
+    int ret = 0;
+#else
 	int	ret = close(file);
+#endif /* RADOSFS */
 
 	if (ret == -1) {
 		os_file_handle_error(NULL, "close");
@@ -3921,12 +4114,18 @@ os_offset_t
 os_file_get_size(
 	os_file_t	file)
 {
+#ifdef RADOSFS
+  struct stat statBuff;
+  file.stat(&statBuff);
+  os_offset_t	file_size = statBuff.st_size;
+#else
 	/* Store current position */
 	os_offset_t	pos = lseek(file, 0, SEEK_CUR);
 	os_offset_t	file_size = lseek(file, 0, SEEK_END);
 
 	/* Restore current position as the function should not change it */
 	lseek(file, pos, SEEK_SET);
+#endif /* RADOSFS */
 
 	return(file_size);
 }
@@ -3942,7 +4141,13 @@ os_file_get_size(
 	struct stat	s;
 	os_file_size_t	file_size;
 
+#ifdef RADOSFS
+    radosfs::File file(&radosFs, filename);
+    int ret = file.stat(&s);
+    delete file;
+#else
 	int	ret = stat(filename, &s);
+#endif /* RADOSFS */
 
 	if (ret == 0) {
 		file_size.m_total_size = s.st_size;
@@ -3973,11 +4178,19 @@ os_file_get_status_posix(
 	bool		check_rw_perm,
 	bool		read_only)
 {
+
+#ifdef RADOSFS
+    radosfs::File file(&radosFs, path);
+    int ret = file.stat(statinfo);
+    delete file;
+
+	if (ret == ENOENT || ret == ENOTDIR) {
+#else
 	int	ret = stat(path, statinfo);
 
 	if (ret && (errno == ENOENT || errno == ENOTDIR)) {
-		/* file does not exist */
-
+#endif /* RADOSFS */
+        /* file does not exist */
 		return(DB_NOT_FOUND);
 
 	} else if (ret) {
@@ -4014,6 +4227,23 @@ os_file_get_status_posix(
 	    && (stat_info->type == OS_FILE_TYPE_FILE
 		|| stat_info->type == OS_FILE_TYPE_BLOCK)) {
 
+#ifdef RADOSFS
+        radosfs::File::OpenMode  rados_open_mode = !read_only ? radosfs::File::MODE_READ_WRITE : radosfs::File::MODE_READ;
+
+        radosfs::File file(&radosFs, path,rados_open_mode);
+
+        if (read_only && file.exists())
+            stat_info->rw_perm = file.isReadable();
+        else
+            stat_info->rw_perm = false;
+
+        if (!read_only && file.exists())
+            stat_info->rw_perm = file.isWritable();
+        else
+            stat_info->rw_perm = false;
+
+        delete file;
+#else
 		int	access = !read_only ? O_RDWR : O_RDONLY;
 		int	fh = ::open(path, access, os_innodb_umask);
 
@@ -4023,6 +4253,7 @@ os_file_get_status_posix(
 			stat_info->rw_perm = true;
 			close(fh);
 		}
+#endif /* RADOSFS */
 	}
 
 	return(DB_SUCCESS);
@@ -4042,7 +4273,11 @@ os_file_truncate_posix(
 	os_file_t	file,
 	os_offset_t	size)
 {
+#ifdef RADOSFS
+    int res = file.truncate(size);
+#else
 	int	res = ftruncate(file, size);
+#endif /* RADOSFS */
 
 	if (res == -1) {
 
@@ -4067,6 +4302,8 @@ bool
 os_file_set_eof(
 	FILE*		file)	/*!< in: file to be truncated */
 {
+    /* never used in a context suitable for rados */
+
 	return(!ftruncate(fileno(file), ftell(file)));
 }
 
@@ -4077,7 +4314,13 @@ bool
 os_file_close_no_error_handling(
 	os_file_t	file)
 {
+#ifdef RADOSFS
+    delete file;
+    return (true);
+#else
 	return(close(file) != -1);
+#endif /* RADOSFS */
+
 }
 
 /** This function can be called if one wants to post a batch of reads and
@@ -5452,8 +5695,6 @@ NUM_RETRIES_ON_PARTIAL_IO times to read/write the complete data.
 @param[out]	err		DB_SUCCESS or error code
 @return number of bytes read/written, -1 if error */
 
-/** Radosfs: could invoque SyncRadosIO instead of SyncFileIO */ 
-
 static MY_ATTRIBUTE((warn_unused_result))
 ssize_t
 os_file_io(
@@ -5964,6 +6205,12 @@ os_file_set_nocache(
 	const char*	operation_name	MY_ATTRIBUTE((unused)))
 {
 	/* some versions of Solaris may not have DIRECTIO_ON */
+#if RADOSFS
+    ib::warn()
+        << "Failed to set O_DIRECT on file "
+        << file_name << "; " << operation_name
+        << "Not supported by Rados";
+#else /* RADOSFS */
 #if defined(UNIV_SOLARIS) && defined(DIRECTIO_ON)
 	if (directio(fd, DIRECTIO_ON) == -1) {
 		int	errno_save = errno;
@@ -6006,6 +6253,7 @@ short_warning:
 		}
 	}
 #endif /* defined(UNIV_SOLARIS) && defined(DIRECTIO_ON) */
+#endif /* RADOSFS */
 }
 
 /** Write the specified number of zeros to a newly created file.
@@ -6279,6 +6527,12 @@ os_is_sparse_file_supported(const char* path, os_file_t fh)
 	return(os_is_sparse_file_supported_win32(path));
 #else
 	dberr_t	err;
+
+#ifdef RADOSFS
+    /* With RADOSFS, page is written as an object so support is
+     * built-in */
+    return(true);
+#endif /* RADOSFS */
 
 	/* We don't know the FS block size, use the sector size. The FS
 	will do the magic. */

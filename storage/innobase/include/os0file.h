@@ -36,7 +36,12 @@ Created 10/21/1995 Heikki Tuuri
 #define os0file_h
 
 #include "univ.i"
+
+#define RADOSFS
+
+#ifdef RADOSFS
 #include <libradosfs.hh>
+#endif /* RADOSFS */
 
 #ifndef _WIN32
 
@@ -56,6 +61,10 @@ extern bool	os_has_said_disk_full;
 extern ulint	os_n_pending_reads;
 /** Number of pending write operations */
 extern ulint	os_n_pending_writes;
+
+#ifdef RADOSFS
+extern radosfs::Filesystem radosFs;
+#endif /* RADOSFS */
 
 /** File offset in bytes */
 typedef ib_uint64_t os_offset_t;
@@ -95,10 +104,20 @@ the OS actually supports it: Win 95 does not, NT does. */
 
 #define SRV_PATH_SEPARATOR	'/'
 
-typedef DIR*	os_file_dir_t;	/*!< directory stream */
+#ifdef RADOSFS
 
+typedef radosf::Dir*	os_file_dir_t;
 /** File handle */
-typedef radosf::File&	os_file_t;
+typedef radosf::File*	os_file_t;
+
+#else
+
+typedef DIR*	os_file_dir_t;	/*!< directory stream */
+/** File handle */
+typedef int     os_file_t;
+
+#endif /* RADOSFS */
+
 
 # define os_file_invalid	(-1)
 
