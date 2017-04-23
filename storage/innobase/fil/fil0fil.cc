@@ -547,6 +547,8 @@ Try and enable FusionIO atomic writes.
 bool
 fil_fusionio_enable_atomic_write(os_file_t file)
 {
+
+#ifndef RADOSFS
 	if (srv_unix_file_flush_method == SRV_UNIX_O_DIRECT) {
 
 		uint	atomic = 1;
@@ -558,6 +560,7 @@ fil_fusionio_enable_atomic_write(os_file_t file)
 			return(true);
 		}
 	}
+#endif
 
 	return(false);
 }
@@ -3570,7 +3573,7 @@ fil_ibd_create(
 
 	bool	atomic_write;
 
-#if !defined(NO_FALLOCATE) && defined(UNIV_LINUX)
+#if !defined(NO_FALLOCATE) && defined(UNIV_LINUX) && !defined(RADOSFS)
 	if (fil_fusionio_enable_atomic_write(file)) {
 
 		/* This is required by FusionIO HW/Firmware */
@@ -5069,7 +5072,7 @@ retry:
 		len = ((node->size + n_node_extend) * page_size) - node_start;
 		ut_ad(len > 0);
 
-#if !defined(NO_FALLOCATE) && defined(UNIV_LINUX)
+#if !defined(NO_FALLOCATE) && defined(UNIV_LINUX) && !defined(RADOSFS)
 		/* This is required by FusionIO HW/Firmware */
 		int	ret = posix_fallocate(node->handle, node_start, len);
 

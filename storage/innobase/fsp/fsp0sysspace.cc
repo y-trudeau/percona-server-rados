@@ -289,6 +289,7 @@ SysTablespace::parse_params(
 			}
 		}
 
+		DBUG_PRINT("m_files.push_back",("filepath = %s, size = %lu!",filepath,size));
 		m_files.push_back(Datafile(filepath, flags(), size, order));
 		Datafile* datafile = &m_files.back();
 		datafile->make_filepath(path(), filepath, NO_EXT);
@@ -436,6 +437,7 @@ dberr_t
 SysTablespace::create_file(
 	Datafile&	file)
 {
+	DBUG_ENTER("SysTablespace::create_file");
 	dberr_t	err = DB_SUCCESS;
 
 	ut_a(!file.m_exists);
@@ -467,7 +469,7 @@ SysTablespace::create_file(
 		err = set_size(file);
 	}
 
-	return(err);
+	DBUG_RETURN(err);
 }
 
 /** Open a data file.
@@ -622,10 +624,13 @@ SysTablespace::check_file_status(
 	const Datafile&		file,
 	file_status_t&		reason)
 {
+	DBUG_ENTER("SysTablespace::check_file_status");
+	
 	os_file_stat_t	stat;
 
 	memset(&stat, 0x0, sizeof(stat));
 
+	DBUG_PRINT("Watch:",("Calling os_file_get_status"));
 	dberr_t	err = os_file_get_status(
 		file.m_filepath, &stat, true,
 		m_ignore_read_only ? false : srv_read_only_mode);
@@ -679,7 +684,7 @@ SysTablespace::check_file_status(
 		ut_ad(0);
 	}
 
-	return(err);
+	DBUG_RETURN(err);
 }
 
 /** Note that the data file was not found.
@@ -691,13 +696,15 @@ SysTablespace::file_not_found(
 	Datafile&	file,
 	bool*	create_new_db)
 {
+	DBUG_ENTER("SysTablespace::file_not_found");
+	
 	file.m_exists = false;
 
 	if (srv_read_only_mode && !m_ignore_read_only) {
 		ib::error() << "Can't create file '" << file.filepath()
 			<< "' when --innodb-read-only is set";
 
-		return(DB_ERROR);
+		DBUG_RETURN(DB_ERROR);
 
 	} else if (&file == &m_files.front()) {
 
@@ -728,7 +735,7 @@ SysTablespace::file_not_found(
 		break;
 	}
 
-	return(DB_SUCCESS);
+	DBUG_RETURN(DB_SUCCESS);
 }
 
 /** Note that the data file was found.
@@ -769,22 +776,26 @@ SysTablespace::check_file_spec(
 	bool*	create_new_db,
 	ulint	min_expected_size)
 {
+	DBUG_ENTER("SysTablespace::check_file_spec");
+	
 	*create_new_db = FALSE;
 
+	DBUG_PRINT("Watch",("Checking number of files %lu",m_files.size()));
 	if (m_files.size() >= 1000) {
 		ib::error() << "There must be < 1000 data files in "
 			<< name() << " but " << m_files.size() << " have been"
 			" defined.";
 
-		return(DB_ERROR);
+		DBUG_RETURN(DB_ERROR);
 	}
 
+	DBUG_PRINT("Watch",("Checking get_sum_of_sizes"));
 	if (get_sum_of_sizes() < min_expected_size / UNIV_PAGE_SIZE) {
 
 		ib::error() << "Tablespace size must be at least "
 			<< min_expected_size / (1024 * 1024) << " MB";
 
-		return(DB_ERROR);
+		DBUG_RETURN(DB_ERROR);
 	}
 
 	dberr_t	err = DB_SUCCESS;
@@ -794,16 +805,19 @@ SysTablespace::check_file_spec(
 	/* If there is more than one data file and the last data file
 	doesn't exist, that is OK. We allow adding of new data files. */
 
+	DBUG_PRINT("Watch",("setting the iterators"));
 	files_t::iterator	begin = m_files.begin();
 	files_t::iterator	end = m_files.end();
 
 	for (files_t::iterator it = begin; it != end; ++it) {
 
+		DBUG_PRINT("Watch",("Checking file status"));
 		file_status_t reason_if_failed;
 		err = check_file_status(*it, reason_if_failed);
 
 		if (err == DB_NOT_FOUND) {
 
+			DBUG_PRINT("Watch",("File not found"));
 			err = file_not_found(*it, create_new_db);
 
 			if (err != DB_SUCCESS) {
@@ -848,7 +862,7 @@ SysTablespace::check_file_spec(
 		err = DB_ERROR;
 	}
 
-	return(err);
+	DBUG_RETURN(err);
 }
 
 /** Open or create the data files
@@ -864,6 +878,7 @@ SysTablespace::open_or_create(
 	ulint*	sum_new_sizes,
 	lsn_t*	flush_lsn)
 {
+	DBUG_ENTER("SysTablespace::open_or_create");
 	dberr_t		err	= DB_SUCCESS;
 	fil_space_t*	space	= NULL;
 
@@ -906,7 +921,7 @@ SysTablespace::open_or_create(
 		}
 
 		if (err != DB_SUCCESS) {
-			return(err);
+			DBUG_RETURN(err);
 		}
 
 #if !defined(NO_FALLOCATE) && defined(UNIV_LINUX)
@@ -938,7 +953,7 @@ SysTablespace::open_or_create(
 		and read LSNs fom the others. */
 		err = read_lsn_and_check_flags(flush_lsn);
 		if (err != DB_SUCCESS) {
-			return(err);
+			DBUG_RETURN(err);
 		}
 	}
 
@@ -979,7 +994,7 @@ SysTablespace::open_or_create(
 		}
 	}
 
-	return(err);
+	DBUG_RETURN(err);
 }
 #endif /* UNIV_HOTBACKUP */
 /** Normalize the file size, convert from megabytes to number of pages. */

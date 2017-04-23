@@ -184,6 +184,10 @@ static const ulint MIN_EXPECTED_TABLESPACE_SIZE = 5 * 1024 * 1024;
 /** */
 #define SRV_MAX_N_PENDING_SYNC_IOS	100
 
+#ifdef RADOSFS
+extern radosfs::Filesystem radosFs;
+#endif /* RADOSFS */
+
 #ifdef UNIV_PFS_THREAD
 /* Keys to register InnoDB threads with performance schema */
 mysql_pfs_key_t	buf_dump_thread_key;
@@ -755,6 +759,7 @@ srv_check_undo_redo_logs_exists()
 			srv_read_only_mode,
 			&ret);
 
+		
 		if (ret) {
 			os_file_close(fh);
 			ib::error()
@@ -1476,6 +1481,25 @@ innobase_start_or_create_for_mysql(void)
 		srv_use_doublewrite_buf = FALSE;
 	}
 
+#ifdef RADOSFS
+int ret;
+ret = radosFs.init("admin", "/etc/ceph/ceph.conf");
+
+if (ret != 0) {
+    ib::error() << "Error initializing the rados filesystem";
+    exit(ret);
+} 
+ib::info() << "Rados filesystem initialized";
+
+radosFs.addDataPool("radosfs_data", srv_data_home,1024*1024*1024);
+radosFs.addMetadataPool("radosfs_meta", srv_data_home);
+
+if (os_file_create_subdirs_if_needed(srv_data_home)) {
+    ib::info() << "MySQL home directory configured in RADOSFS";
+}
+
+#endif /* RADOSFS */
+
 #ifdef HAVE_LZO1X
 	if (lzo_init() != LZO_E_OK) {
 		ib::warn() << "lzo_init() failed, support disabled";
@@ -1917,8 +1941,10 @@ innobase_start_or_create_for_mysql(void)
 		return(srv_init_abort(DB_ERROR));
 	}
 
+	DBUG_PRINT("Before normalize",("srv_data_home = %s",srv_data_home));
 	os_normalize_path(srv_data_home);
-
+	DBUG_PRINT("After normalize",("srv_data_home = %s",srv_data_home));
+	
 	/* Check if the data files exist or not. */
 	err = srv_sys_space.check_file_spec(
 		&create_new_db, MIN_EXPECTED_TABLESPACE_SIZE);

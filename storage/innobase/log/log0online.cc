@@ -562,10 +562,12 @@ log_online_rotate_bitmap_file(
 	lsn_t	next_file_start_lsn)	/*!<in: the start LSN name
 					part */
 {
+
 	if (log_bmp_sys->out.file != os_file_invalid) {
 		os_file_close(log_bmp_sys->out.file);
 		log_bmp_sys->out.file = os_file_invalid;
 	}
+
 	log_bmp_sys->out_seq_num++;
 	log_online_make_bitmap_name(next_file_start_lsn);
 	return log_online_start_bitmap_file();
@@ -1136,7 +1138,7 @@ log_online_write_bitmap_page(
 		return false;
 	}
 
-#ifdef UNIV_LINUX
+#if defined(UNIV_LINUX) && !defined(RADOSFS)
 	posix_fadvise(log_bmp_sys->out.file, log_bmp_sys->out.offset,
 		      MODIFIED_PAGE_BLOCK_SIZE, POSIX_FADV_DONTNEED);
 #endif
@@ -1525,7 +1527,7 @@ log_online_open_bitmap_file_read_only(
 	bitmap_file->size = os_file_get_size(bitmap_file->file);
 	bitmap_file->offset = 0;
 
-#ifdef UNIV_LINUX
+#if defined(UNIV_LINUX) && !defined(RADOSFS)
 	posix_fadvise(bitmap_file->file, 0, 0, POSIX_FADV_SEQUENTIAL);
 	posix_fadvise(bitmap_file->file, 0, 0, POSIX_FADV_NOREUSE);
 #endif

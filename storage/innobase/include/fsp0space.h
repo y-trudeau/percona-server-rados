@@ -79,9 +79,14 @@ public:
 	@param[in]	name	tablespace name */
 	void set_name(const char* name)
 	{
+		DBUG_ENTER("Tablespace::set_name");
+		DBUG_PRINT("Arguments",("name = %s",name));
+
 		ut_ad(m_name == NULL);
 		m_name = mem_strdup(name);
 		ut_ad(m_name != NULL);
+		
+		DBUG_LEAVE;
 	}
 
 	/** Get tablespace name
@@ -96,11 +101,16 @@ public:
 	@param[in]	len	length of the file path */
 	void set_path(const char* path, size_t len)
 	{
+		DBUG_ENTER("Tablespace::set_path");
+		DBUG_PRINT("Arguments",("path = %s, len = %lu",path,len));
+		
 		ut_ad(m_path == NULL);
 		m_path = mem_strdupl(path, len);
 		ut_ad(m_path != NULL);
 
 		os_normalize_path(m_path);
+		
+		DBUG_LEAVE;
 	}
 
 	/** Set tablespace path and filename members.

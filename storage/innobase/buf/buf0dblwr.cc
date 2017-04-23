@@ -646,10 +646,12 @@ buf_dblwr_init_or_load_pages(
 		/* Cannot possibly be upgrading from 4.1 */
 		ut_ad(!reset_space_ids);
 
+#if !defined(RADOSFS)		
 		os_file_set_nocache(parallel_dblwr_buf.file,
 				    parallel_dblwr_buf.path,
 				    "open");
-
+#endif /* !defined(RADOSFS) */
+		
 		os_offset_t size = os_file_get_size(parallel_dblwr_buf.file);
 
 		if (size > MAX_DOUBLEWRITE_FILE_SIZE) {
@@ -1518,9 +1520,10 @@ buf_parallel_dblwr_file_create(void)
 		return(DB_ERROR);
 	}
 
+#if !defined(RADOSFS)
 	os_file_set_nocache(parallel_dblwr_buf.file, parallel_dblwr_buf.path,
 			    "create");
-
+#endif /* !defined(RADOSFS) */
 	success = os_file_set_size(parallel_dblwr_buf.path,
 				   parallel_dblwr_buf.file, size, false);
 	if (!success) {

@@ -380,11 +380,19 @@ row_log_online_op(
 			goto err_exit;
 		}
 
+#ifdef RADOSFS
+		err = os_file_write_by_fd(
+			request,
+			"(modification log)",
+			log->fd,
+			log->tail.block, byte_offset, srv_sort_buf_size);
+#else
 		err = os_file_write(
 			request,
 			"(modification log)",
 			OS_FILE_FROM_FD(log->fd),
 			log->tail.block, byte_offset, srv_sort_buf_size);
+#endif /* RADOSFS */
 		log->tail.blocks++;
 		if (err != DB_SUCCESS) {
 write_failed:
@@ -498,11 +506,19 @@ row_log_table_close_func(
 			goto err_exit;
 		}
 
+#ifdef RADOSFS
+		err = os_file_write_by_fd(
+			request,
+			"(modification log)",
+			log->fd,
+			log->tail.block, byte_offset, srv_sort_buf_size);
+#else
 		err = os_file_write(
 			request,
 			"(modification log)",
 			OS_FILE_FROM_FD(log->fd),
 			log->tail.block, byte_offset, srv_sort_buf_size);
+#endif /* RADOSFS */
 		log->tail.blocks++;
 		if (err != DB_SUCCESS) {
 write_failed:
@@ -2876,12 +2892,21 @@ all_done:
 
 		IORequest	request;
 
+#ifdef RADOSFS
+		dberr_t	err = os_file_read_by_fd_no_error_handling(
+			request,
+			index->online_log->fd,
+			index->online_log->head.block, ofs,
+			srv_sort_buf_size,
+			NULL);
+#else
 		dberr_t	err = os_file_read_no_error_handling(
 			request,
 			OS_FILE_FROM_FD(index->online_log->fd),
 			index->online_log->head.block, ofs,
 			srv_sort_buf_size,
-			NULL);
+			NULL);		
+#endif  /* RADOSFS */
 
 		if (err != DB_SUCCESS) {
 			ib::error()
@@ -3707,13 +3732,22 @@ all_done:
 
 		IORequest	request;
 
+#ifdef RADOSFS
+		dberr_t	err = os_file_read_by_fd_no_error_handling(
+			request,
+			index->online_log->fd,
+			index->online_log->head.block, ofs,
+			srv_sort_buf_size,
+			NULL);
+#else
 		dberr_t	err = os_file_read_no_error_handling(
 			request,
 			OS_FILE_FROM_FD(index->online_log->fd),
 			index->online_log->head.block, ofs,
 			srv_sort_buf_size,
 			NULL);
-
+#endif  /* RADOSFS  */
+		
 		if (err != DB_SUCCESS) {
 			ib::error()
 				<< "Unable to read temporary file"

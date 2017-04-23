@@ -1095,6 +1095,77 @@ private:
 	os_offset_t		m_offset;
 };
 
+#ifdef RADOSFS
+
+/* Class needed to handle IO operations for online index ops which
+ * use local storage over FDs
+ */
+
+/** Helper class for doing synchronous file IO. Currently, the objective
+is to hide the OS specific code, so that the higher level functions aren't
+peppered with #ifdef. Makes the code flow difficult to follow.  */
+class SyncFileIOByFD {
+public:
+	/** Constructor
+	@param[in]	fh	File handle
+	@param[in,out]	buf	Buffer to read/write
+	@param[in]	n	Number of bytes to read/write
+	@param[in]	offset	Offset where to read or write */
+	SyncFileIOByFD(int fh, void* buf, ulint n, os_offset_t offset)
+		:
+		m_fh(fh),
+		m_buf(buf),
+		m_n(static_cast<ssize_t>(n)),
+		m_offset(offset)
+	{
+		ut_ad(m_n > 0);
+	}
+
+	/** Destructor */
+	~SyncFileIOByFD()
+	{
+		/* No op */
+	}
+
+	/** Do the read/write
+	@param[in]	request	The IO context and type
+	@return the number of bytes read/written or negative value on error */
+	ssize_t execute(const IORequest& request);
+
+	/** Do the read/write
+	@param[in,out]	slot	The IO slot, it has the IO context
+	@return the number of bytes read/written or negative value on error */
+	static ssize_t execute(Slot* slot);
+
+	/** Move the read/write offset up to where the partial IO succeeded.
+	@param[in]	n_bytes	The number of bytes to advance */
+	void advance(ssize_t n_bytes)
+	{
+		m_offset += n_bytes;
+
+		ut_ad(m_n >= n_bytes);
+
+		m_n -=  n_bytes;
+
+		m_buf = reinterpret_cast<uchar*>(m_buf) + n_bytes;
+	}
+
+private:
+	/** Open file handle */
+	int		m_fh;
+
+	/** Buffer to read/write */
+	void*			m_buf;
+
+	/** Number of bytes to read/write */
+	ssize_t			m_n;
+
+	/** Offset from where to read/write */
+	os_offset_t		m_offset;
+};
+
+#endif /* RADOSFS */
+
 /** If it is a compressed page return the compressed page data + footer size
 @param[in]	buf		Buffer to check, must include header + 10 bytes
 @return ULINT_UNDEFINED if the page is not a compressed page or length
@@ -1469,12 +1540,13 @@ os_aio_validate_skip()
 
 #undef USE_FILE_LOCK
 #define USE_FILE_LOCK
-#if defined(UNIV_HOTBACKUP) || defined(_WIN32)
+#if defined(UNIV_HOTBACKUP) || defined(_WIN32) || defined(RADOSFS)
 /* InnoDB Hot Backup does not lock the data files.
  * On Windows, mandatory locking is used.
  */
 # undef USE_FILE_LOCK
 #endif
+
 #ifdef USE_FILE_LOCK
 /** Obtain an exclusive lock on a file.
 @param[in]	fd		file descriptor
@@ -1486,6 +1558,7 @@ os_file_lock(
 	int		fd,
 	const char*	name)
 {
+    
 	struct flock lk;
 
 	lk.l_type = F_WRLCK;
@@ -2001,13 +2074,15 @@ dberr_t
 os_file_create_subdirs_if_needed(
 	const char*	path)
 {
+	DBUG_ENTER("os_file_create_subdirs_if_needed");
+	DBUG_PRINT("argument",("path = %s",path));
 	if (srv_read_only_mode) {
 
 		ib::error()
 			<< "read only mode set. Can't create "
 			<< "subdirectories '" << path << "'";
 
-		return(DB_READ_ONLY);
+		DBUG_RETURN(DB_READ_ONLY);
 
 	}
 
@@ -2015,7 +2090,7 @@ os_file_create_subdirs_if_needed(
 
 	if (subdir == NULL) {
 		/* subdir is root or cwd, nothing to do */
-		return(DB_SUCCESS);
+		DBUG_RETURN(DB_SUCCESS);
 	}
 
 	/* Test if subdir exists */
@@ -2032,7 +2107,7 @@ os_file_create_subdirs_if_needed(
 
 			ut_free(subdir);
 
-			return(err);
+			DBUG_RETURN(err);
 		}
 
 		success = os_file_create_directory(subdir, false);
@@ -2040,7 +2115,7 @@ os_file_create_subdirs_if_needed(
 
 	ut_free(subdir);
 
-	return(success ? DB_SUCCESS : DB_ERROR);
+	DBUG_RETURN(success ? DB_SUCCESS : DB_ERROR);
 }
 
 /** Allocate the buffer for IO on a transparently compressed table.
@@ -2161,6 +2236,29 @@ os_file_encrypt_page(
 
 #ifndef _WIN32
 
+#ifdef RADOSFS
+
+/** Do the read/write
+@param[in]	request	The IO context and type
+@return the number of bytes read/written or negative value on error */
+ssize_t
+SyncFileIOByFD::execute(const IORequest& request)
+{
+	ssize_t	n_bytes;
+
+	if (request.is_read()) {
+		n_bytes = pread(m_fh, m_buf, m_n, m_offset);
+	} else {
+		ut_ad(request.is_write());
+		n_bytes = pwrite(m_fh, m_buf, m_n, m_offset);
+	}
+
+	return(n_bytes);
+}
+
+#endif /* RADOSFS */
+
+
 /** Do the read/write
 @param[in]	request	The IO context and type
 @return the number of bytes read/written or negative value on error */
@@ -2171,14 +2269,15 @@ SyncFileIO::execute(const IORequest& request)
 
 	if (request.is_read()) {
 #ifdef RADOSFS
-        n_bytes = mf_fh->read(m_buf, m_offset, m_n);
+        n_bytes = m_fh->read((char *) m_buf, m_offset, m_n);
 #else
 		n_bytes = pread(m_fh, m_buf, m_n, m_offset);
 #endif /* RADOSFS */
 	} else {
 		ut_ad(request.is_write());
 #ifdef RADOSFS
-        int ret = mf_fh->writeSync(m_buf, m_offset, m_n);
+	ib::info() << "DEBUG: calling writeSync";
+        int ret = m_fh->writeSync((char *) m_buf, m_offset, m_n);
         // in theory, since RADOS is atomic
         if (ret == 0) n_bytes = m_n;
         else n_bytes = 0;
@@ -2204,11 +2303,12 @@ os_file_punch_hole_posix(
 {
 
 #ifdef HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE
-	const int	mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
 
 #ifdef RADOSFS
     return(DB_SUCCESS); // noop for RADOS
 #else
+    const int	mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+    
 	int		ret = fallocate(fh, mode, off, len);
 
 	if (ret == 0) {
@@ -2333,6 +2433,9 @@ private:
 dberr_t
 LinuxAIOHandler::resubmit(Slot* slot)
 {
+    
+#ifndef RADOSFS
+
 #ifdef UNIV_DEBUG
 	/* Bytes already read/written out */
 	ulint	n_bytes = slot->ptr - slot->buf;
@@ -2344,6 +2447,7 @@ LinuxAIOHandler::resubmit(Slot* slot)
 	/* Partial read or write scenario */
 	ut_ad(slot->len >= static_cast<ulint>(slot->n_bytes));
 #endif /* UNIV_DEBUG */
+
 
 	slot->len -= slot->n_bytes;
 	slot->ptr += slot->n_bytes;
@@ -2385,6 +2489,10 @@ LinuxAIOHandler::resubmit(Slot* slot)
 	}
 
 	return(ret < 0 ? DB_IO_PARTIAL_FAILED : DB_SUCCESS);
+#else
+    return DB_SUCCESS; /* should never be here */
+#endif /* RADOSFS */
+
 }
 
 /** Check if the AIO succeeded
@@ -3103,7 +3211,8 @@ os_file_fsync_posix(
 
 #ifdef RADOSFS
         int ret = file->sync();
-        int errno = ret * -1;  /* force a local errno since sync()
+        /* int errno = 0;*/
+        errno = ret * -1;  /* force a local errno since sync()
                              doesn't set it but returns the error
                              code */
 #else
@@ -3181,8 +3290,9 @@ os_file_status_posix(
 
 #ifdef RADOSFS
     os_file_t file = new radosfs::File(&radosFs, path,radosfs::File::MODE_READ);
-    int	ret = file.stat(&statinfo);
-    int errno = ret * -1; /* local errno */
+    int	ret = file->stat(&statinfo);
+    /* int errno = 0;*/
+    errno = ret * -1; /* local errno */
     delete file;
 #else
 	int	ret = stat(path, &statinfo);
@@ -3344,6 +3454,8 @@ os_file_create_simple_func(
 		return(OS_FILE_CLOSED);
 	}
 
+    bool	retry;
+    
 #ifdef RADOSFS
     if (create_flag & O_RDONLY) rados_open_mode = radosfs::File::MODE_READ;
     else rados_open_mode = radosfs::File::MODE_READ_WRITE;
@@ -3353,12 +3465,11 @@ os_file_create_simple_func(
 
     do {
         if (create_mode == OS_FILE_CREATE)
-            ret = file->create(os_innodb_umask, "", INNODB_PAGE_SIZE, 4096);
+            ret = file->create(os_innodb_umask, "", UNIV_PAGE_SIZE, 4096);
 
         if (ret != 0) {
 #else
     os_file_t	file;
-	bool	retry;
 
 	do {
 		file = ::open(name, create_flag | create_o_sync,
@@ -3414,8 +3525,12 @@ os_file_set_eof_at(
 	return(SetFilePointerEx(file, li, &li2,FILE_BEGIN)
 	       && SetEndOfFile(file));
 #else
+#ifdef RADOSFS
+    return(file->truncate(new_len));
+#else
 	/* TODO: works only with -D_FILE_OFFSET_BITS=64 ? */
 	return(!ftruncate(file, new_len));
+#endif /* RADOSFS */
 #endif
 }
 
@@ -3434,11 +3549,13 @@ os_file_create_directory(
 	const char*	pathname,
 	bool		fail_if_exists)
 {
-
+    DBUG_ENTER("os_file_create_directory");
+    DBUG_PRINT("arguments",("path = %s",pathname));
+    
 #ifdef RADOSFS
     radosfs::Dir dir(&radosFs, pathname);
     int rcode = dir.create(0770,false,-1,-1);
-    int errno = rcode * -1;
+    errno = rcode * -1;
 #else
 	int	rcode = mkdir(pathname, 0770);
 #endif /* RADOSFS */
@@ -3447,10 +3564,10 @@ os_file_create_directory(
 		/* failure */
 		os_file_handle_error_no_exit(pathname, "mkdir", false);
 
-		return(false);
+		DBUG_RETURN(false);
 	}
 
-	return(true);
+	DBUG_RETURN(true);
 }
 
 /**
@@ -3472,8 +3589,8 @@ os_file_opendir(
 {
 
 #ifdef RADOSFS
-    os_file_dir_t dir = new radosFs::Dir(&radosFS,dirname);
-    if (!dir.exists()) {
+    os_file_dir_t dir = new radosfs::Dir(&radosFs,dirname);
+    if (!dir->exists()) {
         delete dir;
         dir = NULL;
     }
@@ -3545,7 +3662,7 @@ next_file:
 
 #ifdef RADOSFS
     std::string entry;
-    ret = dir->nextEntry(&entry);
+    ret = dir->nextEntry(entry);
 
 	if (ret != 0) {
 
@@ -3616,9 +3733,9 @@ next_file:
 	sprintf(full_path, "%s/%s", dirname, ent->d_name);
 
 #ifdef RADOSFS
-    os_file_t file = new radosfs::File(&radosFs, path,radosfs::File::MODE_READ);
-    int	ret = file.stat(&statinfo);
-    int errno = ret * -1; /* local errno */
+    os_file_t file = new radosfs::File(&radosFs, full_path,radosfs::File::MODE_READ);
+    ret = file->stat(&statinfo);
+    errno = ret * -1; /* local errno */
     delete file;
 #else
 
@@ -3696,6 +3813,8 @@ os_file_create_func(
 	bool		on_error_no_exit;
 	bool		on_error_silent;
 
+	DBUG_ENTER("os_file_create_func");
+	DBUG_PRINT("arguments",("name = %s",name));
 #ifdef RADOSFS
     radosfs::File::OpenMode  rados_open_mode;
 #endif /* RADOSFS */
@@ -3706,7 +3825,7 @@ os_file_create_func(
 		"ib_create_table_fail_disk_full",
 		*success = false;
 		errno = ENOSPC;
-		return(OS_FILE_CLOSED);
+		DBUG_RETURN(OS_FILE_CLOSED);
 	);
 
 	int		create_flag;
@@ -3747,7 +3866,7 @@ os_file_create_func(
 			<< "Unknown file create mode (" << create_mode << ")"
 			<< " for file '" << name << "'";
 
-		return(OS_FILE_CLOSED);
+		DBUG_RETURN(OS_FILE_CLOSED);
 	}
 
 	ut_a(type == OS_LOG_FILE
@@ -3769,27 +3888,40 @@ os_file_create_func(
 	}
 #endif /* O_SYNC */
 
+	bool		retry;
 #ifdef RADOSFS
     if (create_flag & O_RDONLY) rados_open_mode = radosfs::File::MODE_READ;
     else rados_open_mode = radosfs::File::MODE_READ_WRITE;
 
+/*	char  *NewName;
+	NewName = static_cast<char*>(ut_malloc_nokey(strlen(name)));  
+	strcpy(NewName,name);
+	NewName++; */
+	
 	os_file_t	file = new radosfs::File(&radosFs, name,rados_open_mode);
-    int         ret=0;
+	int         	ret=0;
 
-    do {
-        if (create_flag & O_TRUNC)
-            file->truncate(0);
-        if (create_mode == OS_FILE_CREATE)
-            ret = file->create(os_innodb_umask, "", INNODB_PAGE_SIZE, 4096);
+	do {
+		/* we must know if the file exists or not, the creation of the radosfs::file
+		 * instance has little chance of failing.  If the file does not exist
+		 * stat will return -NOENT 
+		 */
+		struct stat	statinfo;
+		ret = file->stat(&statinfo)*-1;
 
-        if (ret != 0) {
+		if (create_flag & O_TRUNC)
+			file->truncate(0);
+		if (create_mode == OS_FILE_CREATE)
+			ret = file->create(os_innodb_umask, "", UNIV_PAGE_SIZE, 16*1024);
+
+		DBUG_PRINT("Watch",("file->create returned %i",ret));
+		if (ret != 0) {
 #else
     os_file_t	file;
-	bool		retry;
 
 	do {
 
-        file = ::open(name, create_flag, os_innodb_umask);
+		file = ::open(name, create_flag, os_innodb_umask);
 
 		if (file == -1) {
 #endif /* RADOSFS */
@@ -3860,7 +3992,7 @@ os_file_create_func(
 #endif /* USE_FILE_LOCK */
 #endif /* !RADOSFS */
 
-	return(file);
+	DBUG_RETURN(file);
 }
 
 /** NOTE! Use the corresponding macro
@@ -3934,14 +4066,13 @@ os_file_create_simple_no_error_handling_func(
     if (create_flag & O_RDONLY) rados_open_mode = radosfs::File::MODE_READ;
     else rados_open_mode = radosfs::File::MODE_READ_WRITE;
 
-	os_file_t	file = new radosfs::File(&radosFs, name,rados_open_mode);
-    int         ret=0;
-
-    do {
+	file = new radosfs::File(&radosFs, name,rados_open_mode);
+    int   ret=0;
+    
     if (create_flag & O_TRUNC)
         file->truncate(0);
     if (create_mode == OS_FILE_CREATE)
-        ret = file->create(os_innodb_umask, "", INNODB_PAGE_SIZE, 4096);
+        ret = file->create(os_innodb_umask, "", UNIV_PAGE_SIZE, 4096);
 
     *success = (file != NULL);
 #else
@@ -3983,15 +4114,18 @@ os_file_delete_if_exists_func(
 
 #ifdef RADOSFS
 	os_file_t	file = new radosfs::File(&radosFs, name,radosfs::File::MODE_WRITE);
-    int ret;
+	int ret;
 
-    *exist = file.exists();
-    if (*exists)
-        ret = file.remove();
-    delete file;
-
-    if (ret != 0) {
-        os_file_handle_error_no_exit(name, "delete", false);
+	*exist = file->exists();
+	if (*exist) {
+		ret = file->remove();
+		delete file;
+	} else {
+		ret = 0;
+	}
+	
+	if (ret != 0) {
+		os_file_handle_error_no_exit(name, "delete", false);
 
 #else
 	int	ret = unlink(name);
@@ -4021,10 +4155,10 @@ os_file_delete_func(
 {
 
 #ifdef RADOSFS
-	os_file_t	file = new radosfs::File(&radosFs, name,radosfs::File::MODE_WRITE);
+	os_file_t file = new radosfs::File(&radosFs, name,radosfs::File::MODE_WRITE);
 
-    int ret = file.remove();
-    delete file;
+    int ret = file->remove();
+    delete &file;
 #else
 	int	ret = unlink(name);
 #endif /* RADOSFS */
@@ -4066,7 +4200,7 @@ os_file_rename_func(
 #ifdef RADOSFS
     radosfs::File file(&radosFs, oldpath);
     int ret = file.rename(newpath);
-    delete file;
+    delete &file;
 #else
 	int	ret = rename(oldpath, newpath);
 #endif /* RADOSFS */
@@ -4116,7 +4250,7 @@ os_file_get_size(
 {
 #ifdef RADOSFS
   struct stat statBuff;
-  file.stat(&statBuff);
+  file->stat(&statBuff);
   os_offset_t	file_size = statBuff.st_size;
 #else
 	/* Store current position */
@@ -4144,7 +4278,6 @@ os_file_get_size(
 #ifdef RADOSFS
     radosfs::File file(&radosFs, filename);
     int ret = file.stat(&s);
-    delete file;
 #else
 	int	ret = stat(filename, &s);
 #endif /* RADOSFS */
@@ -4180,17 +4313,17 @@ os_file_get_status_posix(
 {
 
 #ifdef RADOSFS
-    radosfs::File file(&radosFs, path);
-    int ret = file.stat(statinfo);
-    delete file;
+	radosfs::File file(&radosFs, path);
+	int ret = file.stat(statinfo);
 
-	if (ret == ENOENT || ret == ENOTDIR) {
+	if (ret == -ENOENT || ret == -ENOTDIR) {
 #else
 	int	ret = stat(path, statinfo);
 
 	if (ret && (errno == ENOENT || errno == ENOTDIR)) {
 #endif /* RADOSFS */
         /* file does not exist */
+		DBUG_PRINT("Watch os_file_get_status_posix",("DB_NOT_FOUND"));
 		return(DB_NOT_FOUND);
 
 	} else if (ret) {
@@ -4241,8 +4374,6 @@ os_file_get_status_posix(
             stat_info->rw_perm = file.isWritable();
         else
             stat_info->rw_perm = false;
-
-        delete file;
 #else
 		int	access = !read_only ? O_RDWR : O_RDONLY;
 		int	fh = ::open(path, access, os_innodb_umask);
@@ -4274,7 +4405,7 @@ os_file_truncate_posix(
 	os_offset_t	size)
 {
 #ifdef RADOSFS
-    int res = file.truncate(size);
+    int res = file->truncate(size);
 #else
 	int	res = ftruncate(file, size);
 #endif /* RADOSFS */
@@ -5744,6 +5875,7 @@ os_file_io(
 
 	for (ulint i = 0; i < NUM_RETRIES_ON_PARTIAL_IO; ++i) {
 
+		ib::info() << "DEBUG: calling sync_file_io.execute";
 		ssize_t	n_bytes = sync_file_io.execute(type);
 
 		/* Check for a hard error. Not much we can do now. */
@@ -5839,6 +5971,7 @@ os_file_pwrite(
 	(void) os_atomic_increment_ulint(&os_n_pending_writes, 1);
 	MONITOR_ATOMIC_INC(MONITOR_OS_PENDING_WRITES);
 
+	ib::info() << "DEBUG: calling os_file_io";
 	ssize_t	n_bytes = os_file_io(type, file, (void*) buf, n, offset, err);
 
 	DBUG_EXECUTE_IF("xb_simulate_all_o_direct_write_failure",
@@ -5874,6 +6007,7 @@ os_file_write_page(
 	ut_ad(type.validate());
 	ut_ad(n > 0);
 
+	ib::info() << "DEBUG: calling os_file_pwrite";
 	ssize_t	n_bytes = os_file_pwrite(type, file, buf, n, offset, &err);
 
 	if ((ulint) n_bytes != n && !os_has_said_disk_full) {
@@ -6205,16 +6339,10 @@ os_file_set_nocache(
 	const char*	operation_name	MY_ATTRIBUTE((unused)))
 {
 	/* some versions of Solaris may not have DIRECTIO_ON */
-#if RADOSFS
-    ib::warn()
-        << "Failed to set O_DIRECT on file "
-        << file_name << "; " << operation_name
-        << "Not supported by Rados";
-#else /* RADOSFS */
+
 #if defined(UNIV_SOLARIS) && defined(DIRECTIO_ON)
 	if (directio(fd, DIRECTIO_ON) == -1) {
 		int	errno_save = errno;
-
 		ib::error()
 			<< "Failed to set DIRECTIO_ON on file "
 			<< file_name << ": " << operation_name
@@ -6253,7 +6381,7 @@ short_warning:
 		}
 	}
 #endif /* defined(UNIV_SOLARIS) && defined(DIRECTIO_ON) */
-#endif /* RADOSFS */
+
 }
 
 /** Write the specified number of zeros to a newly created file.
@@ -6270,6 +6398,9 @@ os_file_set_size(
 	os_offset_t	size,
 	bool		read_only)
 {
+  
+	ib::info() << "DEBUG in os_file_set_size";
+	
 	/* Write up to 1 megabyte at a time. */
 	ulint	buf_size = ut_min(
 		static_cast<ulint>(64),
@@ -6314,7 +6445,7 @@ os_file_set_size(
 		/* Using OS_AIO_SYNC mode on POSIX systems will result in
 		fall back to os_file_write/read. On Windows it will use
 		special mechanism to wait before it returns back. */
-
+		ib::info() << "Calling_os_aio";
 		err = os_aio(
 			request,
 			OS_AIO_SYNC, name,
@@ -6403,6 +6534,435 @@ os_file_read_func(
 	return(os_file_read_page(type, file, buf, offset, n, NULL, true, trx));
 }
 
+#ifdef RADOSFS
+
+/* functions needed for online index operations that uses temporary files not_full
+ * in rados which are accessed by fd 
+ */
+
+/** Does a syncronous read or write depending upon the type specified
+In case of partial reads/writes the function tries
+NUM_RETRIES_ON_PARTIAL_IO times to read/write the complete data.
+@param[in]	type,		IO flags
+@param[in]	file		handle to an open file
+@param[out]	buf		buffer where to read
+@param[in]	offset		file offset from the start where to read
+@param[in]	n		number of bytes to read, starting from offset
+@param[out]	err		DB_SUCCESS or error code
+@return number of bytes read/written, -1 if error */
+static MY_ATTRIBUTE((warn_unused_result))
+ssize_t
+os_file_io_by_fd(
+	const IORequest&in_type,
+	int		file,
+	void*		buf,
+	ulint		n,
+	os_offset_t	offset,
+	dberr_t*	err)
+{
+	Block*		block;
+	ulint		original_n = n;
+	IORequest	type = in_type;
+	byte*		compressed_page;
+	ssize_t		bytes_returned = 0;
+
+	if (type.is_compressed()) {
+
+		/* We don't compress the first page of any file. */
+		ut_ad(offset > 0);
+
+		block = os_file_compress_page(type, buf, &n);
+
+		compressed_page = static_cast<byte*>(
+			ut_align(block->m_ptr, UNIV_SECTOR_SIZE));
+	} else {
+		block = NULL;
+		compressed_page = NULL;
+	}
+
+	/* We do encryption after compression, since if we do encryption
+	before compression, the encrypted data will cause compression fail
+	or low compression rate. */
+        if (type.is_encrypted() && type.is_write()) {
+		/* We don't encrypt the first page of any file. */
+		Block*	compressed_block = block;
+		ut_ad(offset > 0);
+
+		block = os_file_encrypt_page(type, buf, &n);
+
+		if (compressed_block != NULL) {
+			os_free_block(compressed_block);
+		}
+        }
+
+	SyncFileIOByFD	sync_file_io(file, buf, n, offset);
+
+	for (ulint i = 0; i < NUM_RETRIES_ON_PARTIAL_IO; ++i) {
+
+		ssize_t	n_bytes = sync_file_io.execute(type);
+
+		/* Check for a hard error. Not much we can do now. */
+		if (n_bytes < 0) {
+
+			break;
+
+		} else if ((ulint) n_bytes + bytes_returned == n) {
+
+			bytes_returned += n_bytes;
+
+			/* only here for temp files which are not encrypted or compressed
+			 * so io_complete is skipped
+			 * */
+			
+			*err = DB_SUCCESS;
+
+			if (block != NULL) {
+				os_free_block(block);
+			}
+
+			return(original_n);
+		}
+
+		/* Handle partial read/write. */
+
+		ut_ad((ulint) n_bytes + bytes_returned < n);
+
+		bytes_returned += (ulint) n_bytes;
+
+		if (!type.is_partial_io_warning_disabled()) {
+
+			const char*	op = type.is_read()
+				? "read" : "written";
+
+			ib::warn()
+				<< n
+				<< " bytes should have been " << op << ". Only "
+				<< bytes_returned
+				<< " bytes " << op << ". Retrying"
+				<< " for the remaining bytes.";
+		}
+
+		/* Advance the offset and buffer by n_bytes */
+		sync_file_io.advance(n_bytes);
+	}
+
+	if (block != NULL) {
+		os_free_block(block);
+	}
+
+	*err = DB_IO_ERROR;
+
+	if (!type.is_partial_io_warning_disabled()) {
+		ib::warn()
+			<< "Retry attempts for "
+			<< (type.is_read() ? "reading" : "writing")
+			<< " partial data failed.";
+	}
+
+	return(bytes_returned);
+}
+
+/** Does a synchronous read operation in Posix.
+@param[in]	type		IO flags
+@param[in]	file		handle to an open file
+@param[out]	buf		buffer where to read
+@param[in]	offset		file offset from the start where to read
+@param[in]	n		number of bytes to read, starting from offset
+@param[out]	err		DB_SUCCESS or error code
+@return number of bytes read, -1 if error */
+static MY_ATTRIBUTE((warn_unused_result))
+ssize_t
+os_file_pread_by_fd(
+	IORequest&	type,
+	int		file,
+	void*		buf,
+	ulint		n,
+	os_offset_t	offset,
+	trx_t*		trx,
+	dberr_t*	err)
+{
+	ulint		sec;
+	ulint		ms;
+	ib_uint64_t	start_time;
+	ib_uint64_t	finish_time;
+
+	++os_n_file_reads;
+
+	if (UNIV_LIKELY_NULL(trx))
+	{
+		ut_ad(trx->take_stats);
+		trx->io_reads++;
+		trx->io_read += n;
+		ut_usectime(&sec, &ms);
+		start_time = (ib_uint64_t)sec * 1000000 + ms;
+	} else {
+		start_time = 0;
+	}
+
+	(void) os_atomic_increment_ulint(&os_n_pending_reads, 1);
+	MONITOR_ATOMIC_INC(MONITOR_OS_PENDING_READS);
+
+	ssize_t	n_bytes = os_file_io_by_fd(type, file, buf, n, offset, err);
+
+	DBUG_EXECUTE_IF("xb_simulate_all_o_direct_read_failure",
+			n_bytes = -1;
+			errno = EINVAL;);
+
+	if (UNIV_UNLIKELY(start_time != 0))
+	{
+		ut_usectime(&sec, &ms);
+		finish_time = (ib_uint64_t)sec * 1000000 + ms;
+		trx->io_reads_wait_timer += (ulint)(finish_time - start_time);
+	}
+
+	(void) os_atomic_decrement_ulint(&os_n_pending_reads, 1);
+	MONITOR_ATOMIC_DEC(MONITOR_OS_PENDING_READS);
+
+	return(n_bytes);
+}
+
+/** Requests a synchronous positioned read operation.
+@return DB_SUCCESS if request was successful, false if fail
+@param[in]	type		IO flags
+@param[in]	file		handle to an open file
+@param[out]	buf		buffer where to read
+@param[in]	offset		file offset from the start where to read
+@param[in]	n		number of bytes to read, starting from offset
+@param[out]	o		number of bytes actually read
+@param[in]	exit_on_err	if true then exit on error
+@return DB_SUCCESS or error code */
+static MY_ATTRIBUTE((warn_unused_result))
+dberr_t
+os_file_read_by_fd_page(
+	IORequest&	type,
+	int		file,
+	void*		buf,
+	os_offset_t	offset,
+	ulint		n,
+	ulint*		o,
+	bool		exit_on_err,
+	trx_t*		trx)
+{
+	dberr_t		err;
+	ut_ad(!trx || trx->take_stats);
+
+	os_bytes_read_since_printout += n;
+
+	ut_ad(type.validate());
+	ut_ad(n > 0);
+
+	for (;;) {
+		ssize_t	n_bytes;
+
+		n_bytes = os_file_pread_by_fd(type, file, buf, n, offset, trx, &err);
+
+		if (o != NULL) {
+			*o = n_bytes;
+		}
+
+		if (err != DB_SUCCESS && !exit_on_err) {
+
+			return(err);
+
+		} else if ((ulint) n_bytes == n) {
+
+			/** The read will succeed but decompress can fail
+			for various reasons. */
+
+			if (type.is_compression_enabled()
+			    && !Compression::is_compressed_page(
+				    static_cast<byte*>(buf))) {
+
+				return(DB_SUCCESS);
+
+			} else {
+				return(err);
+			}
+		}
+
+		ib::error() << "Tried to read " << n
+			<< " bytes at offset " << offset
+			<< ", but was only able to read " << n_bytes;
+
+		if (exit_on_err) {
+
+			if (!os_file_handle_error(NULL, "read")) {
+				/* Hard error */
+				break;
+			}
+
+		} else if (!os_file_handle_error_no_exit(NULL, "read", false)) {
+
+			/* Hard error */
+			break;
+		}
+
+		if (n_bytes > 0 && (ulint) n_bytes < n) {
+			n -= (ulint) n_bytes;
+			offset += (ulint) n_bytes;
+			buf = reinterpret_cast<uchar*>(buf) + (ulint) n_bytes;
+		}
+	}
+
+	ib::fatal()
+		<< "Cannot read from file. OS error number "
+		<< errno << ".";
+
+	return(err);
+}
+
+/** NOTE! Use the corresponding macro os_file_read_by_fd_no_error_handling_func(),
+not directly this function!
+Requests a synchronous positioned read operation.
+@return DB_SUCCESS if request was successful, DB_IO_ERROR on failure
+@param[in]	type		IO flags
+@param[in]	file		handle to an open file
+@param[out]	buf		buffer where to read
+@param[in]	offset		file offset from the start where to read
+@param[in]	n		number of bytes to read, starting from offset
+@param[out]	o		number of bytes actually read
+@return DB_SUCCESS or error code */
+dberr_t
+os_file_read_by_fd_no_error_handling_func(
+	IORequest&	type,
+	int		file,
+	void*		buf,
+	os_offset_t	offset,
+	ulint		n,
+	ulint*		o)
+{
+	ut_ad(type.is_read());
+
+	return(os_file_read_by_fd_page(type, file, buf, offset, n, o, false, NULL));
+}
+
+/** Does a synchronous write operation in Posix.
+@param[in]	type		IO context
+@param[in]	file		handle to an open file
+@param[out]	buf		buffer from which to write
+@param[in]	n		number of bytes to read, starting from offset
+@param[in]	offset		file offset from the start where to read
+@param[out]	err		DB_SUCCESS or error code
+@return number of bytes written, -1 if error */
+static MY_ATTRIBUTE((warn_unused_result))
+ssize_t
+os_file_pwrite_by_fd(
+	IORequest&	type,
+	int		file,
+	const byte*	buf,
+	ulint		n,
+	os_offset_t	offset,
+	dberr_t*	err)
+{
+	ut_ad(type.validate());
+
+	++os_n_file_writes;
+
+	(void) os_atomic_increment_ulint(&os_n_pending_writes, 1);
+	MONITOR_ATOMIC_INC(MONITOR_OS_PENDING_WRITES);
+
+	ssize_t	n_bytes = os_file_io_by_fd(type, file, (void*) buf, n, offset, err);
+
+	DBUG_EXECUTE_IF("xb_simulate_all_o_direct_write_failure",
+			n_bytes = -1;
+			errno = EINVAL;
+			*err = DB_IO_ERROR;);
+
+	(void) os_atomic_decrement_ulint(&os_n_pending_writes, 1);
+	MONITOR_ATOMIC_DEC(MONITOR_OS_PENDING_WRITES);
+
+	return(n_bytes);
+}
+
+/** Requests a synchronous write operation.
+@param[in]	type		IO flags
+@param[in]	file		handle to an open file
+@param[out]	buf		buffer from which to write
+@param[in]	offset		file offset from the start where to read
+@param[in]	n		number of bytes to read, starting from offset
+@return DB_SUCCESS if request was successful, false if fail */
+static MY_ATTRIBUTE((warn_unused_result))
+dberr_t
+os_file_write_by_fd_page(
+	IORequest&	type,
+	const char*	name,
+	int		file,
+	const byte*	buf,
+	os_offset_t	offset,
+	ulint		n)
+{
+	dberr_t		err;
+
+	ut_ad(type.validate());
+	ut_ad(n > 0);
+
+	ssize_t	n_bytes = os_file_pwrite_by_fd(type, file, buf, n, offset, &err);
+
+	if ((ulint) n_bytes != n && !os_has_said_disk_full) {
+
+		ib::error()
+			<< "Write to file " << name << "failed at offset "
+			<< offset << ", " << n
+			<< " bytes should have been written,"
+			" only " << n_bytes << " were written."
+			" Operating system error number " << errno << "."
+			" Check that your OS and file system"
+			" support files of this size."
+			" Check also that the disk is not full"
+			" or a disk quota exceeded.";
+
+		if (strerror(errno) != NULL) {
+
+			ib::error()
+				<< "Error number " << errno
+				<< " means '" << strerror(errno) << "'";
+		}
+
+		ib::info() << OPERATING_SYSTEM_ERROR_MSG;
+
+		os_diagnose_all_o_direct_einval(errno);
+
+		os_has_said_disk_full = true;
+	}
+
+	return(err);
+}
+
+
+/** NOTE! Use the corresponding macro os_file_write(), not directly
+Requests a synchronous write operation.
+@param[in]	type		IO flags
+@param[in]	file		handle to an open file
+@param[out]	buf		buffer from which to write
+@param[in]	offset		file offset from the start where to read
+@param[in]	n		number of bytes to read, starting from offset
+@return DB_SUCCESS if request was successful, false if fail */
+dberr_t
+os_file_write_by_fd_func(
+	IORequest&	type,
+	const char*	name,
+	int		file,
+	const void*	buf,
+	os_offset_t	offset,
+	ulint		n)
+{
+	ut_ad(type.validate());
+	ut_ad(type.is_write());
+
+	/* We never compress the first page.
+	Note: This assumes we always do block IO. */
+	if (offset == 0) {
+		type.clear_compressed();
+	}
+
+	const byte*	ptr = reinterpret_cast<const byte*>(buf);
+
+	return(os_file_write_by_fd_page(type, name, file, ptr, offset, n));
+}
+
+
+#endif /* RADOSFS */
+
 /** NOTE! Use the corresponding macro os_file_read_no_error_handling(),
 not directly this function!
 Requests a synchronous positioned read operation.
@@ -6456,6 +7016,7 @@ os_file_write_func(
 
 	const byte*	ptr = reinterpret_cast<const byte*>(buf);
 
+	ib::info() << "DEBUG: Calling os_file_write_page";
 	return(os_file_write_page(type, name, file, ptr, offset, n));
 }
 
@@ -7156,6 +7717,9 @@ AIO::reserve_slot(
 	ulint		len,
 	ulint		space_id)
 {
+    
+#ifndef RADOSFS
+
 #ifdef WIN_ASYNC_IO
 	ut_a((len & 0xFFFFFFFFUL) == len);
 #endif /* WIN_ASYNC_IO */
@@ -7361,6 +7925,8 @@ AIO::reserve_slot(
 	release();
 
 	return(slot);
+    
+#endif /* RADOSFS */
 }
 
 /** Wakes up a simulated aio i/o-handler thread if it has something to do.
@@ -7728,6 +8294,7 @@ os_aio_func(
 
 		ut_ad(type.is_write());
 
+		ib::info() << "DEBUG: Calling os_file_write_func";
 		return(os_file_write_func(type, name, file, buf, offset, n));
 	}
 

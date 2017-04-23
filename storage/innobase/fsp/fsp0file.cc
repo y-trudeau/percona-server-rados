@@ -179,7 +179,11 @@ Datafile::init_file_info()
 #ifdef _WIN32
 	GetFileInformationByHandle(m_handle, &m_file_info);
 #else
+#ifdef RADOSFS
+    m_handle->stat(&m_file_info);
+#else
 	fstat(m_handle, &m_file_info);
+#endif  /* RADOSFS */
 #endif	/* WIN32 */
 }
 

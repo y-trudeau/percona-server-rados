@@ -728,6 +728,10 @@ PSI_stage_info	srv_stage_buffer_pool_load
 	= {0, "buffer pool load", PSI_FLAG_STAGE_PROGRESS};
 #endif /* HAVE_PSI_STAGE_INTERFACE */
 
+#ifdef RADOSFS
+radosfs::Filesystem radosFs;
+#endif /* RADOSFS */
+
 /*********************************************************************//**
 Prints counters for work done by srv_master_thread. */
 static

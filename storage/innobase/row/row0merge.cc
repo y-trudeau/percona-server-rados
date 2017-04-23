@@ -1075,9 +1075,15 @@ row_merge_read(
 	/* Merge sort pages are never compressed. */
 	request.disable_compression();
 
+#ifdef RADOSFS
+	dberr_t	err = os_file_read_by_fd_no_error_handling(
+		request,
+		fd, buf, ofs, srv_sort_buf_size, NULL);
+#else
 	dberr_t	err = os_file_read_no_error_handling(
 		request,
-		OS_FILE_FROM_FD(fd), buf, ofs, srv_sort_buf_size, NULL);
+		OS_FILE_FROM_FD(fd), buf, ofs, srv_sort_buf_size, NULL);	
+#endif /* RADOSFS */
 #ifdef POSIX_FADV_DONTNEED
 	/* Each block is read exactly once.  Free up the file cache. */
 	posix_fadvise(fd, ofs, srv_sort_buf_size, POSIX_FADV_DONTNEED);
@@ -1112,10 +1118,15 @@ row_merge_write(
 
 	request.disable_compression();
 
+#ifdef RADOSFS
+	dberr_t	err = os_file_write_by_fd(
+		request,
+		  "(merge)", fd, buf, ofs, buf_len);
+#else
 	dberr_t	err = os_file_write(
 		request,
-		"(merge)", OS_FILE_FROM_FD(fd), buf, ofs, buf_len);
-
+		  "(merge)", OS_FILE_FROM_FD(fd), buf, ofs, buf_len);
+#endif /* RADOSFS */
 #ifdef POSIX_FADV_DONTNEED
 	/* The block will be needed on the next merge pass,
 	but it can be evicted from the file cache meanwhile. */

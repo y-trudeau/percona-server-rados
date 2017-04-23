@@ -38,6 +38,10 @@ IF(UNIX)
       LINK_LIBRARIES(aio)
     ENDIF()
 
+    IF(RADOSFS)
+      LINK_LIBRARIES(radosfs)
+    ENDIF() 
+
     IF(HAVE_LIBNUMA)
       LINK_LIBRARIES(numa)
     ENDIF()

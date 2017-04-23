@@ -251,8 +251,8 @@ struct fil_node_t {
 	char*		name;
 	/** whether this file is open */
 	bool		is_open;
-	/** radosfs file handle (valid if is_open) */
-	radosfs::File	handle;
+	/** file handle (valid if is_open) */
+	os_file_t	handle;
 	/** event that groups and serializes calls to fsync */
 	os_event_t	sync_event;
 	/** whether the file actually is a raw device or disk partition */
