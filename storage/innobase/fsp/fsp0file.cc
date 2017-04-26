@@ -87,6 +87,8 @@ Datafile::open_or_create(bool read_only_mode)
 	ut_a(m_filepath != NULL);
 	ut_ad(m_handle == OS_FILE_CLOSED);
 
+	ib::info() << "DEBUG: Datafile::open_or_create: " << m_filepath;
+	
 	m_handle = os_file_create(
 		innodb_data_file_key, m_filepath, m_open_flags,
 		OS_FILE_NORMAL, OS_DATA_FILE, read_only_mode, &success);

@@ -1483,7 +1483,11 @@ innobase_start_or_create_for_mysql(void)
 
 #ifdef RADOSFS
 int ret;
+
+
 ret = radosFs.init("admin", "/etc/ceph/ceph.conf");
+
+radosFs.setLogLevel(radosfs::Filesystem::LOG_LEVEL_DEBUG);
 
 if (ret != 0) {
     ib::error() << "Error initializing the rados filesystem";
@@ -1491,12 +1495,16 @@ if (ret != 0) {
 } 
 ib::info() << "Rados filesystem initialized";
 
+srv_data_home = "/mysqlrados/";
+
 radosFs.addDataPool("radosfs_data", srv_data_home,1024*1024*1024);
 radosFs.addMetadataPool("radosfs_meta", srv_data_home);
 
 if (os_file_create_subdirs_if_needed(srv_data_home)) {
     ib::info() << "MySQL home directory configured in RADOSFS";
 }
+
+
 
 #endif /* RADOSFS */
 

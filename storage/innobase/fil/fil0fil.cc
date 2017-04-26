@@ -3178,6 +3178,10 @@ fil_make_filepath(
 		path = fil_path_to_mysql_datadir;
 	}
 
+#ifdef RADOSFS
+  path = "/mysqlrados";
+#endif /* RADOSFS */
+	
 	ulint	len		= 0;	/* current length */
 	ulint	path_len	= strlen(path);
 	ulint	name_len	= (name ? strlen(name) : 0);

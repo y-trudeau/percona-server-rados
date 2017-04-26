@@ -2276,7 +2276,8 @@ SyncFileIO::execute(const IORequest& request)
 	} else {
 		ut_ad(request.is_write());
 #ifdef RADOSFS
-	ib::info() << "DEBUG: calling writeSync";
+	ib::info() << "DEBUG: calling writeSync, m_n = " << m_n 
+		<< " m_offset = " << m_offset;
         int ret = m_fh->writeSync((char *) m_buf, m_offset, m_n);
         // in theory, since RADOS is atomic
         if (ret == 0) n_bytes = m_n;
@@ -3819,6 +3820,8 @@ os_file_create_func(
     radosfs::File::OpenMode  rados_open_mode;
 #endif /* RADOSFS */
 
+        ib::info() << "Debug: Creating file: " << name;
+        
 	*success = false;
 
 	DBUG_EXECUTE_IF(
@@ -3911,10 +3914,10 @@ os_file_create_func(
 
 		if (create_flag & O_TRUNC)
 			file->truncate(0);
-		if (create_mode == OS_FILE_CREATE)
+		if (create_mode == OS_FILE_CREATE) 
 			ret = file->create(os_innodb_umask, "", UNIV_PAGE_SIZE, 16*1024);
 
-		DBUG_PRINT("Watch",("file->create returned %i",ret));
+		ib::info() << "DEBUG: file->create returned" << ret;
 		if (ret != 0) {
 #else
     os_file_t	file;
@@ -4200,7 +4203,6 @@ os_file_rename_func(
 #ifdef RADOSFS
     radosfs::File file(&radosFs, oldpath);
     int ret = file.rename(newpath);
-    delete &file;
 #else
 	int	ret = rename(oldpath, newpath);
 #endif /* RADOSFS */
@@ -6399,15 +6401,20 @@ os_file_set_size(
 	bool		read_only)
 {
   
-	ib::info() << "DEBUG in os_file_set_size";
+	ib::info() << "DEBUG: in os_file_set_size";
 	
 	/* Write up to 1 megabyte at a time. */
 	ulint	buf_size = ut_min(
 		static_cast<ulint>(64),
 		static_cast<ulint>(size / UNIV_PAGE_SIZE));
-
+	
+#ifdef RADOSFS
+	/* only going by pages for radosfs, we want every page to be an object */
+	buf_size = UNIV_PAGE_SIZE;
+#else
 	buf_size *= UNIV_PAGE_SIZE;
-
+#endif /* RADOSFS */
+	
 	/* Align the buffer for possible raw i/o */
 	byte*	buf2;
 
@@ -6445,7 +6452,8 @@ os_file_set_size(
 		/* Using OS_AIO_SYNC mode on POSIX systems will result in
 		fall back to os_file_write/read. On Windows it will use
 		special mechanism to wait before it returns back. */
-		ib::info() << "Calling_os_aio";
+		ib::info() << "DEBUG: Calling_os_aio to write " 
+			  << n_bytes << " bytes";
 		err = os_aio(
 			request,
 			OS_AIO_SYNC, name,
@@ -7718,8 +7726,6 @@ AIO::reserve_slot(
 	ulint		space_id)
 {
     
-#ifndef RADOSFS
-
 #ifdef WIN_ASYNC_IO
 	ut_a((len & 0xFFFFFFFFUL) == len);
 #endif /* WIN_ASYNC_IO */
@@ -7888,8 +7894,7 @@ AIO::reserve_slot(
 
 		ResetEvent(slot->handle);
 	}
-#elif defined(LINUX_NATIVE_AIO)
-
+#elif defined(LINUX_NATIVE_AIO) && !defined(RADOSFS)
 	/* If we are not using native AIO skip this part. */
 	if (srv_use_native_aio) {
 
@@ -7926,7 +7931,6 @@ AIO::reserve_slot(
 
 	return(slot);
     
-#endif /* RADOSFS */
 }
 
 /** Wakes up a simulated aio i/o-handler thread if it has something to do.
